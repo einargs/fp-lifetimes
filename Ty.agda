@@ -1,4 +1,5 @@
 {-# OPTIONS --sized-types #-}
+{-# OPTIONS --show-implicit #-}
 
 module Ty where
 
@@ -33,29 +34,29 @@ data IncBy : TyCtxt → Set where
   IS : ∀ {G k} → IncBy G → IncBy (G k% k)
 
 data Ty : {Size} → TyCtxt → Kind → Set where
-  #tvar : ∀ {i G k} → k K∈ G → Ty {i} G k
-  _⇒_ : ∀ {i G} {j : Size< i} → Ty {j} G Mono → Ty {j} G Mono → Ty {i} G Mono
+  #tvar : ∀ {i G k} → k K∈ G → Ty {↑ i} G k
+  _⇒_ : ∀ {i G} → Ty {i} G Mono → Ty {i} G Mono → Ty {↑ i} G Mono
   𝔹 : ∀ {i G} → Ty {i} G Mono
-  #∀ : ∀ {i} {j : Size< i} {G k} → (k' : Kind) → Ty {j} (G k% k') k → Ty {i} G k
+  #∀ : ∀ {i G k} → (k' : Kind) → Ty {i} (G k% k') k → Ty {↑ i} G k
 
-data TySub {i : Size} {ti : Size} : TyCtxt → TyCtxt → Set where
-  Inc : ∀ {G Gadd} → IncBy Gadd → TySub {i} {ti} G (G <k> Gadd)
-  _#<_ : ∀ {G G' k} {j : Size< i}
+data TySub : {Size} → {Size} → TyCtxt → TyCtxt → Set where
+  Inc : ∀ {i ti G Gadd} → IncBy Gadd → TySub {↑ i} {ti} G (G <k> Gadd)
+  _#<_ : ∀ {i ti G G' k}
     → Ty {ti} G' k
-    → TySub {j} {ti} G G'
-    → TySub {i} {ti} (G k% k) G'
-  _#<>_ : ∀ {G1 G2 G3} {j : Size< i}
-    → TySub {j} {ti} G1 G2
-    → TySub {j} {ti} G2 G3
-    → TySub {i} {ti} G1 G3
+    → TySub {i} {ti} G G'
+    → TySub {↑ i} {ti} (G k% k) G'
+  _#<>_ : ∀ {i ti G1 G2 G3}
+    → TySub {i} {ti} G1 G2
+    → TySub {i} {ti} G2 G3
+    → TySub {↑ i} {ti} G1 G3
 
-nilSub : ∀ {G i ti} → TySub {i} {ti} G G
+nilSub : ∀ {G i ti} → TySub {↑ i} {ti} G G
 nilSub = Inc IZ
 
-singleSub : ∀ {G k i ti} → Ty {ti} G k → TySub {↑ i} {ti} (G k% k) G
+singleSub : ∀ {G k i ti} → Ty {ti} G k → TySub {↑ ↑ i} {ti} (G k% k) G
 singleSub t = t #< nilSub
 
-lift : ∀ {G G' k i ti} → TySub {i} {ti} G G' → TySub {↑ ↑ i} {ti} (G k% k) (G' k% k)
+lift : ∀ {G G' k i ti} → TySub {↑ i} {↑ ti} G G' → TySub {↑ ↑ ↑ i} {↑ ti} (G k% k) (G' k% k)
 lift s = #tvar KZ #< (s #<> Inc (IS IZ))
 
 add : ∀ {G Gadd k} → IncBy Gadd → k K∈ G → k K∈ (G <k> Gadd)
@@ -63,18 +64,14 @@ add IZ i = i
 add (IS xs) i = KS (add xs i)
 
 private
-
-  -- value of index x in the substitution s
-  --applySub : ∀ {i si G G' k} → TySub {si} {i} G G' → k K∈ G → Ty {i} G' k
-
-  substTy : ∀ {i si G G' k} → TySub {si} {i} G G' → Ty {i} G k → Ty {i} G' k
+  substTy : ∀ {i} {si G G' k} → TySub {si} {↑ i} G G' → Ty {↑ i} G k → Ty {↑ i} G' k
   substTy s 𝔹 = 𝔹
   substTy s (#tvar x) = applySub s x where
-    applySub : ∀ {i si G G' k} → TySub {si} {i} G G' → k K∈ G → Ty {i} G' k
+    applySub : ∀ {i} {si G G' k} → TySub {↑ ↑ si} {↑ i} G G' → k K∈ G → Ty {↑ i} G' k
     applySub (Inc n) x = #tvar (add n x)
     applySub (k #< s) KZ = k
     applySub (k #< s) (KS x) = applySub s x
-    applySub (s1 #<> s2) x = substTy s2 (applySub s1 x)
-  substTy s (#∀ k body) = #∀ k (substTy (lift s) body)
+    applySub {i} (s1 #<> s2) x = substTy s2 (applySub s1 x)
+  substTy {i} s (#∀ {i'} k body) = #∀ k {! substTy (lift s) body !}
   substTy s (t1 ⇒ t2) = {! (substTy s t1) ⇒ (substTy s t2) !}
 
