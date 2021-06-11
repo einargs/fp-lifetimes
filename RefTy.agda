@@ -303,14 +303,20 @@ data _∋r_ : ∀ Γ → Γ ⊢* Type* → Set where
   RK : ∀ {Γ K A} → Γ ∋r A → (Γ ,* K) ∋r weaken* A
   RT : ∀ {Γ A B} → Γ ∋r A → (Γ , B) ∋r weakenT* A
 
-data peelK⊇ : ∀ {Φ Ψ K} → Φ ,* K ⊇ Ψ ,* K → Φ ⊇ Ψ → Set where
-  peel-keepK : ∀ {Φ Ψ K ss} → peelK⊇ (keepK⊇ {Φ} {Ψ} {K = K} ss) ss
-  peel-refl : ∀ {Γ K} → peelK⊇ {Γ} {Γ} {K} refl⊇ refl⊇
+peelK⊇ : ∀ {Φ Ψ K} → Φ ,* K ⊇ Ψ ,* K → Φ ⊇ Ψ
+peelK⊇ refl⊇ = refl⊇
+peelK⊇ (keepK⊇ ss) = ss
 
 data _⊢_!_ Φ : Φ ⊢* Type* → (Ψ : Ctx) → {Φ ⊇ Ψ} → Set where
   -- boolean terms
   #true : _⊢_!_ Φ 𝔹 Φ {refl⊇}
   #false : _⊢_!_ Φ 𝔹 Φ {refl⊇}
+  -- if then else
+  #if_then_else_ : ∀ {Ψ Θ ss1 ss2 A}
+    → _⊢_!_ Φ 𝔹 Ψ {ss1}
+    → _⊢_!_ Ψ (weaken⊇ ss2 A) Θ {ss2}
+    → _⊢_!_ Ψ (weaken⊇ ss2 A) Θ {ss2}
+    → (let ss = comp⊇ ss1 ss2 in _⊢_!_ Φ (weaken⊇ ss A) Θ {ss})
   -- consume a term variable
   #use : ∀ {Ψ A} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Φ A Ψ {conv⊇ u}
   -- Inspect a reference term variable without consuming it.
@@ -334,16 +340,19 @@ data _⊢_!_ Φ : Φ ⊢* Type* → (Ψ : Ctx) → {Φ ⊇ Ψ} → Set where
   -- Note that `K`, since it's a type variable and thus can't be
   -- dropped from the context, needs to also occur in the output.
   -- TODO: figure out a better solution than this clumsy peelK⊇ hack.
-  Λ : ∀ {Ψ K A ss1 ss2} {p : peelK⊇ ss1 ss2} → _⊢_!_ (Φ ,* K) A (Ψ ,* K) {ss1}
-    → _⊢_!_ Φ (*∀ A) Ψ {ss2}
+  Λ : ∀ {Ψ K A ss} → _⊢_!_ (Φ ,* K) A (Ψ ,* K) {ss}
+    → _⊢_!_ Φ (*∀ A) Ψ {peelK⊇ ss}
   -- type application (forall)
   _·*_ : ∀ {Ψ K A ss} → _⊢_!_ Φ (*∀ A) Ψ {ss} → (B : Ψ ⊢* K)
     → _⊢_!_ Φ (A [ weaken⊇ ss B ]*) Ψ {ss}
   -- type conversion
   #cast : ∀ {Ψ A B ss} → A ≡β B → _⊢_!_ Φ A Ψ {ss} → _⊢_!_ Φ B Ψ {ss}
 
+andBool : ∅ ⊢ (𝔹 ⇒ (𝔹 ⇒ 𝔹)) ! ∅
+andBool = #λ (#λ (#if (#use (UT UZ drop-𝔹)) then (#use UZ) else (#drop UZ #false)))
+
 setBool : ∅ ⊢ (*∀ {K = Life*} (𝔹 r⇒ (*& (*var KZ) 𝔹 ⇒ 𝔹))) ! ∅
-setBool = Λ {p = peel-refl}
+setBool = Λ
   (#λr
     (#λ
       (#drop UZ
