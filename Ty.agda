@@ -292,8 +292,6 @@ sub*-comp {s = s} {s' = s'} (*∀ t) = cong *∀ (trans
   (sub*-cong lifts*-comp t)
   (sub*-comp {s = lifts* s} {s' = lifts* s'} t))
 
---TODO: rest of laws for ren*, lifts*, sub*
-
 -- type equality
 -- https://github.com/input-output-hk/plutus-metatheory/blob/cb596a1eb697c083c4bdf2ade4d37bbd2c3cb0bc/Type/Equality.lagda#L34
 
