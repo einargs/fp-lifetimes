@@ -386,48 +386,148 @@ data MultCtx (Φ : Ctx) : (Ψ : Ctx) → {PreCtx Φ Ψ} → Set where
 Ctx# : Ctx → Set
 Ctx# Φ = MultCtx Φ Φ {pre-refl}
 
-data _⊢_!_ {Φ} (Γ : Ctx# Φ) : Φ ⊢* Type* → ∀ {Ψ} → Ctx# Ψ → {Φ ⊇ Ψ} → Set where
+data IsUsed : Set where
+  used : IsUsed
+  unused : IsUsed
+data RefCtx : Ctx → Set where
+  ∅ : RefCtx ∅
+  ConsK : ∀ {Γ} → RefCtx Γ → (K : Kind) → IsUsed → RefCtx (Γ ,* K)
+  ConsT : ∀ {Γ} → RefCtx Γ → (A : Γ ⊢* Type*) → IsUsed → RefCtx (Γ , A)
+
+addRef : ∀ {Φ tag} → RefCtx Φ → InCtx tag Φ → RefCtx Φ
+addRef (ConsK Γ K u) (SK i) = ConsK (addRef Γ i) K u
+addRef (ConsK Γ K u) KZ = ConsK Γ K used
+addRef (ConsT Γ A u) EZ = ConsT Γ A used
+addRef (ConsT Γ A u) (ST i) = ConsT (addRef Γ i) A u
+
+noRefs : ∀ Φ → RefCtx Φ
+noRefs ∅ = ∅
+noRefs (G ,* K) = ConsK (noRefs G) K unused
+noRefs (G , A) = ConsT (noRefs G) A unused
+
+singleRef : ∀ {Φ tag} → InCtx tag Φ → RefCtx Φ
+singleRef {Φ} i = addRef (noRefs Φ) i
+
+use-or : IsUsed → IsUsed → IsUsed
+use-or used used = used
+use-or used unused = used
+use-or unused used = used
+use-or unused unused = unused
+
+infixl 4 _∪_
+_∪_ : ∀ {Φ} → RefCtx Φ → RefCtx Φ → RefCtx Φ
+∅ ∪ ∅ = ∅
+ConsK G1 K u1 ∪ ConsK G2 .K u2 = ConsK (G1 ∪ G2) K (use-or u1 u2)
+ConsT G1 A u1 ∪ ConsT G2 .A u2 = ConsT (G1 ∪ G2) A (use-or u1 u2)
+
+restrictRCK : ∀ {Φ K} → RefCtx (Φ ,* K) → RefCtx Φ
+restrictRCK (ConsK G K u) = G
+
+-- Convert a lifetime to a reference.
+lt2ref : ∀ {Φ} → Φ ⊢* Life* → RefCtx Φ
+lt2ref L = f L
+  where
+  f : ∀ {Φ K} → Φ ⊢* K → RefCtx Φ
+  f {Φ} *'static = noRefs Φ
+  f (*var x) = singleRef x
+  f (*' x) = singleRef x
+  f (L1 *∩ L2) = f L1 ∪ f L2
+  f (A ·* B) = f A ∪ f B
+  f (*λ A) = restrictRCK (f A)
+  f {Φ} A = noRefs Φ
+
+data RefOrUse {Φ} : Φ ⊢* Type* → Φ ⊢* Type* → Set where
+  isRef : ∀ {L A} → RefOrUse A (*& L A)
+  isUse : ∀ {A} → RefOrUse A A
+
+data _⊢_!_ Φ : Φ ⊢* Type* → (Ψ : Ctx) → {Φ ⊇ Ψ} → Set
+refIn : ∀ {Φ B A Ψ ss} → _⊢_!_ (Φ , B) A Ψ {ss} → RefCtx Φ
+
+data _⊢_!_ Φ where
   -- boolean terms
-  #true : _⊢_!_ Γ 𝔹 Γ {refl⊇}
-  #false : _⊢_!_ Γ 𝔹 Γ {refl⊇}
-  -- if then else
-  #if_then_else_ : ∀ {Ψ Θ ss1 ss2 A} {Δ : Ctx# Ψ} {Ε : Ctx# Θ}
-    → _⊢_!_ Γ 𝔹 Δ {ss1}
-    → _⊢_!_ Δ (weaken⊇ ss2 A) Ε {ss2}
-    → _⊢_!_ Δ (weaken⊇ ss2 A) Ε {ss2}
-    → (let ss = comp⊇ ss1 ss2 in _⊢_!_ Γ (weaken⊇ ss A) Ε {ss})
+  #true : _⊢_!_ Φ 𝔹 Φ {refl⊇}
+  #false : _⊢_!_ Φ 𝔹 Φ {refl⊇}
+  -- if then else (consumes)
+  #if_then_else_ : ∀ {Ψ Θ ss1 ss2 A B} {ru : RefOrUse 𝔹 B}
+    → _⊢_!_ Φ 𝔹 Ψ {ss1}
+    → _⊢_!_ Ψ (weaken⊇ ss2 A) Θ {ss2}
+    → _⊢_!_ Ψ (weaken⊇ ss2 A) Θ {ss2}
+    → (let ss = comp⊇ ss1 ss2 in _⊢_!_ Φ (weaken⊇ ss A) Θ {ss})
   -- consume a term variable
-  #use : ∀ {Ψ A} {Δ : Ctx# Ψ} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Γ A Δ {conv⊇ u}
-  {-
+  #use : ∀ {Ψ A} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Φ A Ψ {conv⊇ u}
   -- Inspect a reference term variable without consuming it.
-  #ref : ∀ {L A} → (r : Φ ∋ *& L A) → _⊢_!_ Φ (*& L A) Φ {refl⊇} {lt2ref L}
+  #ref : ∀ {L A} → (r : Φ ∋ *& L A) → _⊢_!_ Φ (*& L A) Φ {refl⊇}
   -- drop a variable without doing anything with it before the term.
   -- TODO: I may want to add a drop clause for after a term. (I could
   -- mimic that with let in as well.)
-  #drop : ∀ {Ψ Θ A B ss R} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Ψ B Θ {ss} {R}
-    → _⊢_!_ Φ (weaken⊇ (conv⊇ u) B) Θ {comp⊇ (conv⊇ u) ss} {R}
+  #drop : ∀ {Ψ Θ A B ss} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Ψ B Θ {ss}
+    → _⊢_!_ Φ (weaken⊇ (conv⊇ u) B) Θ {comp⊇ (conv⊇ u) ss}
   -- take a reference to a variable without consuming it.
-  #& : ∀ {A} → (i : Φ ∋ A) → _⊢_!_ Φ (*& (*' (eraseTV i)) A) Φ {refl⊇} {tv2ref i}
+  #& : ∀ {A} → (i : Φ ∋ A) → _⊢_!_ Φ (*& (*' (eraseTV i)) A) Φ {refl⊇}
   -- term lambda (one use)
-  #λ : ∀ {Ψ A B ss R} → _⊢_!_ (Φ , B) (weakenT* A) Ψ {skipT⊇ ss} {R} → _⊢_!_ Φ (B ⇒ A) Ψ {ss} {R}
+  #λ : ∀ {Ψ A L B ss} → (t : _⊢_!_ (Φ , B) (weakenT* A) Ψ {skipT⊇ ss})
+    → {refIn t ≡ lt2ref L} → _⊢_!_ Φ (B [ L ]⊸ A) Ψ {ss}
   -- term lambda (multiple use)
-  #λr : ∀ {A B R} → _⊢_!_ (Φ , B) (weakenT* A) Φ {skipT⊇ refl⊇} {R} → _⊢_!_ Φ (B r⇒ A) Φ {refl⊇} {R}
+  #λr : ∀ {A L B} → (t : _⊢_!_ (Φ , B) (weakenT* A) Φ {skipT⊇ refl⊇})
+    → {refIn t ≡ lt2ref L} → _⊢_!_ Φ (B [ L ]⇒ A) Φ {refl⊇}
   -- term app (consumes function)
-  _·_ : ∀ {Ψ Θ A ss1 ss2 R1 R2} {B : Ψ ⊢* Type*} → _⊢_!_ Φ (weaken⊇ ss1 B ⇒ A) Ψ {ss1} {R1}
-    → _⊢_!_ Ψ B Θ {ss2} {R2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2} {join ss2 R1 R2}
+  _·_ : ∀ {Ψ Θ A L ss1 ss2} {B : Ψ ⊢* Type*} → _⊢_!_ Φ (weaken⊇ ss1 B [ L ]⊸ A) Ψ {ss1}
+    → _⊢_!_ Ψ B Θ {ss2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2}
   -- term app (doesn't consume function)
-  _·r_ : ∀ {Ψ Θ L A B ss1 ss2 R1 R2} → _⊢_!_ Φ (*& L (weaken⊇ ss1 B r⇒ A)) Ψ {ss1} {R1}
-    → _⊢_!_ Ψ B Θ {ss2} {R2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2} {join ss2 R1 R2}
+  _·r_ : ∀ {Ψ Θ L A M B ss1 ss2} → _⊢_!_ Φ (*& L (weaken⊇ ss1 B [ M ]⇒ A)) Ψ {ss1}
+    → _⊢_!_ Ψ B Θ {ss2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2}
   -- type forall
   -- Note that `K`, since it's a type variable and thus can't be
   -- dropped from the context, needs to also occur in the output.
-  Λ : ∀ {Ψ K A ss R} → _⊢_!_ (Φ ,* K) A (Ψ ,* K) {ss} {R}
-    → _⊢_!_ Φ (*∀ A) Ψ {peelK⊇ ss} {peelKRef R}
+  Λ : ∀ {Ψ K A ss} → _⊢_!_ (Φ ,* K) A (Ψ ,* K) {ss}
+    → _⊢_!_ Φ (*∀ A) Ψ {peelK⊇ ss}
   -- type application (forall)
-  _·*_ : ∀ {Ψ K A ss R} → _⊢_!_ Φ (*∀ A) Ψ {ss} {R} → (B : Ψ ⊢* K)
-    → _⊢_!_ Φ (A [ weaken⊇ ss B ]*) Ψ {ss} {R}
+  _·*_ : ∀ {Ψ K A ss} → _⊢_!_ Φ (*∀ A) Ψ {ss} → (B : Ψ ⊢* K)
+    → _⊢_!_ Φ (A [ weaken⊇ ss B ]*) Ψ {ss}
   -- type conversion
-  #cast : ∀ {Ψ A B ss R} → A ≡β B → _⊢_!_ Φ A Ψ {ss} {R} → _⊢_!_ Φ B Ψ {ss} {R}
+  #cast : ∀ {Ψ A B ss} → A ≡β B → _⊢_!_ Φ A Ψ {ss} → _⊢_!_ Φ B Ψ {ss}
+
+expandRC : ∀ {Φ Ψ} → Φ ⊇ Ψ → RefCtx Ψ → RefCtx Φ
+expandRC refl⊇ G = G
+expandRC (keepK⊇ ss) (ConsK G K u) = ConsK (expandRC ss G) K u
+expandRC (skipT⊇ {A = A} ss) G = ConsT (expandRC ss G) A unused
+expandRC (keepT⊇ {A = A} ss x) (ConsT G A' u) = ConsT (expandRC ss G) A u
+
+refIn {Φ} {B} t = restrictRC (f t)
+  where
+  restrictRC : ∀ {Φ A} → RefCtx (Φ , A) → RefCtx Φ
+  restrictRC (ConsT G A u) = G
+
+  f : ∀ {Φ Ψ A ss} → _⊢_!_ Φ A Ψ {ss} → RefCtx Φ
+  f {Φ} #true = noRefs Φ
+  f {Φ} #false = noRefs Φ
+  f (#if_then_else_ {ss1 = ss} {ru = ru} t1 t2 t3) = ? -- f t1 ∪ expandRC ss (f t2 ∪ f t3)
+  f {A = *& L A} (#use u) = lt2ref L
+  f {Φ} (#use u) = noRefs Φ
+  f {A = *& L A} (#ref r) = lt2ref L
+  f (#drop u t) = expandRC (conv⊇ u) (f t)
+  f (#& i) = singleRef (eraseTV i)
+  f (#λ t) = restrictRC (f t)
+  f (#λr t) = restrictRC (f t)
+  f (_·_ {ss1 = ss} t1 t2) = f t1 ∪ expandRC ss (f t2)
+  f (_·r_ {ss1 = ss} t1 t2) = f t1 ∪ expandRC ss (f t2)
+  f (Λ t) = restrictRCK (f t)
+  f (t ·* B) = f t
+  f (#cast x t) = f t
+
+{-
+problem : (∅ , 𝔹) ⊢ 𝔹 ! ∅
+problem = gets2nd · (#drop UZ #true)
+  where
+  -- imagine if instead of dropping the reference this matched on
+  -- or otherwise read the reference. In this case, imagine you clone
+  -- the boolean to return it as the final result; you could return
+  -- the closure and call it later when that boolean is out of scope.
+  takesRef : (∅ , 𝔹) ⊢ ((*& (*' EZ) 𝔹) [ *'static ]⇒ (𝔹 [ *' EZ ]⊸ 𝔹)) ! (∅ , 𝔹)
+  takesRef = (#λr (#λ
+    (#if (#ref (UT UZ drop-𝔹)) then (#use UZ) else (#drop UZ #false)) {refl}) {refl})
+  gets2nd : (∅ , 𝔹) ⊢ 𝔹 [ *' EZ ]⊸ 𝔹 ! (∅ , 𝔹)
+  gets2nd = (#λ ((#& TZ) ·r (#drop UZ (#& TZ))) {refl}) · takesRef
   -}
 
 {-
