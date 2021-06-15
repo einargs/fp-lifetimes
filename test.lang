@@ -1,0 +1,36 @@
+-- automatic insertion of copy for copyable (as opposed to cloneable) types;
+copy : &'a Int -> Int
+copy i = ?
+
+_+_ : Int -> Int -> Int
+m + n = ?
+
+-- I need to be able to do that -['a]> thing where I indicate
+-- all the references/lifetimes it uses. I think I actually will
+-- need an intersection operator for lifetimes, since that's basically
+-- what that is. That also means I'll need a 'static lifetime type.
+--
+-- That also means I'm going to need
+append : & 'a Str -> Str -['a]> Str
+append r s = ...
+
+trust : World -> Str -o (World , Str)
+trust w s = let (w' , a) = readLine w in
+      toMultFun (append &a s) -- reference to `a` escapes scope of `a`
+
+-- Automatic conversion of multi-use functions `->` to single-use functions `-o`.
+toMultFn : (a -> a) -> a -o a
+toMultFn f x = f x
+
+flip : (a -o b -o c) -> b -o a -o c
+flip f y x = f x y
+
+data List a = Nil | Cons a (List a)
+
+-- Add one to all lists.
+-- You want to put the list last so you can use it multiple times
+-- (thanks to clone).
+addToAll : Int -> List Int -> List Int
+addToAll x (Cons y ys) = Cons (copy x + y) (addToAll (copy x) ys)
+addToAll x Nil = Nil
+

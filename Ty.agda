@@ -369,7 +369,7 @@ data _⊢Nf*_ Φ where
   *λ : ∀ {K J} → Φ ,* K ⊢Nf* J → Φ ⊢Nf* (K ⇒* J)
   ne : ∀ {K} → Φ ⊢Ne* K → Φ ⊢Nf* K
   _⇒_ : Φ ⊢Nf* Mono → Φ ⊢Nf* Mono → Φ ⊢Nf* Mono
-  *∀ : ∀ {K} → Φ ,* K ⊢Nf* Mono → Φ ⊢Nf* Mono
+
   𝔹 : Φ ⊢Nf* Mono
 
 renNe* : ∀ {Φ Ψ} → Ren* Φ Ψ → ∀ {K} → Φ ⊢Ne* K → Ψ ⊢Ne* K

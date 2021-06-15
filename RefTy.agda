@@ -5,11 +5,7 @@ import Relation.Binary.PropositionalEquality as Eq
 open Eq using (_≡_; refl; trans; sym; cong; cong-app; subst; cong₂)
 open import Data.Sum using (_⊎_; inj₁; inj₂)
 open import Data.Product using (_×_) renaming (_,_ to <_,_>)
-
--- I think that I may have to merge the type contexts
--- and term contexts for a reference to depend on a term
--- variable.
-
+open import Relation.Nullary using (¬_)
 
 data Kind : Set where
   -- the kind of types that directly classify terms.
@@ -54,8 +50,6 @@ data _⊢*_ Γ where
   *var : ∀ {K} → Γ ∋* K → Γ ⊢* K
   -- lifetime of the given term variable
   *' : TermVar Γ → Γ ⊢* Life*
-  -- intersection of two lifetimes (may not be necessary?)
-  -- *∩ : Γ ⊢* Life* → Γ ⊢* Life* → Γ ⊢* Life*
   -- reference to a variable of the given type.
   -- We don't combine `*'` with it because we need *var to
   -- also work.
@@ -296,57 +290,248 @@ conv⊇ UZ = skipT⊇ refl⊇
 conv⊇ (UK u) = keepK⊇ (conv⊇ u)
 conv⊇ (UT u rt) = keepT⊇ (conv⊇ u) rt
 
-infix 4 _∋r_
--- Inspect a reference term variable without consuming it.
-data _∋r_ : ∀ Γ → Γ ⊢* Type* → Set where
-  RZ : ∀ {Γ L A} → (Γ , *& L A) ∋r weakenT* (*& L A)
-  RK : ∀ {Γ K A} → Γ ∋r A → (Γ ,* K) ∋r weaken* A
-  RT : ∀ {Γ A B} → Γ ∋r A → (Γ , B) ∋r weakenT* A
-
 peelK⊇ : ∀ {Φ Ψ K} → Φ ,* K ⊇ Ψ ,* K → Φ ⊇ Ψ
 peelK⊇ refl⊇ = refl⊇
 peelK⊇ (keepK⊇ ss) = ss
 
-data _⊢_!_ Φ : Φ ⊢* Type* → (Ψ : Ctx) → {Φ ⊇ Ψ} → Set where
+-- Erase a consuming term variable.
+use2tv : ∀ {Φ A Ψ} → Φ ∋ A ! Ψ → TermVar Φ
+use2tv UZ = EZ
+use2tv (UK u) = SK (use2tv u)
+use2tv (UT u x) = ST (use2tv u)
+
+data Droppable : ∀ {Φ} → TermVar Φ → Set where
+  droppable : ∀ {Φ A Ψ} → (u : Φ ∋ A ! Ψ) → Droppable (use2tv u)
+
+data RefdIn : ∀ {Φ K} → Φ ⊢* K → TermVar Φ → Set where
+  refd-*' : ∀ {Φ tv} → RefdIn {Φ} (*' tv) tv
+  refd-*&1 : ∀ {Φ tv L A} → RefdIn {Φ} L tv → RefdIn (*& L A) tv
+  refd-*&2 : ∀ {Φ tv L A} → RefdIn {Φ} A tv → RefdIn (*& L A) tv
+  -- We ignore references in return or argument of functions;
+  -- TODO: use function-attached lifetime info.
+  refd-·*1 : ∀ {Φ tv J K} {A : Φ ⊢* J ⇒* K} {B : Φ ⊢* J}
+    → RefdIn {Φ} A tv → RefdIn (A ·* B) tv
+  refd-·*2 : ∀ {Φ tv J K} {A : Φ ⊢* J ⇒* K} {B : Φ ⊢* J}
+    → RefdIn {Φ} B tv → RefdIn (A ·* B) tv
+  refd-*λ : ∀ {Φ J K tv A} → RefdIn {Φ ,* J} {K} A (SK tv) → RefdIn (*λ A) tv
+  refd-*∀ : ∀ {Φ K tv A} → RefdIn {Φ ,* K} A (SK tv) → RefdIn (*∀ A) tv
+
+-- Referenced.
+data Refd : ∀ {Φ A} → Φ ∋ A → TermVar Φ → Set where
+  refd-TZ : ∀ {Φ} {A : Φ ⊢* Type*} {tv : TermVar (Φ , A)} → RefdIn (weakenT* A) tv
+    → Refd (TZ {A = A}) tv
+  refd-TK : ∀ {Φ A K i tv} → Refd {Φ} {A} i tv → Refd {A = weaken* A} (TK i) (SK {K = K} tv)
+  refd-TT : ∀ {Φ A B i tv} → Refd {Φ} {A} i tv → Refd {A = weakenT* A} (TT i) (ST {A = B} tv)
+
+-- Shows that a context is a prefix of another context.
+data PreCtx : Ctx → Ctx → Set where
+  pre-refl : ∀ {Φ} → PreCtx Φ Φ
+  pre-dropK : ∀ {Φ Ψ} K → PreCtx Φ (Ψ ,* K) → PreCtx Φ Ψ
+  pre-dropT : ∀ {Φ Ψ} A → PreCtx Φ (Ψ , A) → PreCtx Φ Ψ
+
+pre∅ : ∀ Φ → PreCtx Φ ∅
+pre∅ C = f C pre-refl
+  where
+  f : ∀ G → PreCtx C G → PreCtx C ∅
+  f ∅ sc = sc
+  f (G ,* K) sc = f G (pre-dropK K sc)
+  f (G , A) sc = f G (pre-dropT A sc)
+
+pre2tv : ∀ {Φ Ψ A} → PreCtx Φ (Ψ , A) → TermVar Φ
+pre2tv {Φ} preCtx = f preCtx EZ
+  where
+  f : ∀ {G} → PreCtx Φ G → TermVar G → TermVar Φ
+  f pre-refl i = i
+  f (pre-dropK K pc) i = f pc (SK i)
+  f (pre-dropT A pc) i = f pc (ST i)
+
+-- Counts all referrers.
+data Referrers (Φ : Ctx) (tv : TermVar Φ) : Set where
+  RootRef : ∀ {A} {referrer : Φ ∋ A} → Refd referrer tv → Referrers Φ tv
+  ConsRef : Referrers Φ tv → ∀ {A} {referrer : Φ ∋ A}
+    → Refd referrer tv → Referrers Φ tv
+
+data Ctx# (Φ : Ctx) : (Ψ : Ctx) → {PreCtx Φ Ψ} → Set where
+  ∅ : Ctx# Φ ∅ {pre∅ Φ}
+  ConK : ∀ {K Ψ pc} → Ctx# Φ Ψ {pre-dropK K pc} → Ctx# Φ (Ψ ,* K) {pc}
+  ConFree : ∀ {Ψ A pc} → Ctx# Φ Ψ {pre-dropT A pc}
+    → Droppable (pre2tv pc) → Ctx# Φ (Ψ , A) {pc}
+  ConRefd : ∀ {Ψ A pc} → Ctx# Φ Ψ {pre-dropT A pc}
+    → Referrers Φ (pre2tv pc) → Ctx# Φ (Ψ , A) {pc}
+
+-- TODO: I need to add a reference/lifetime parameter to function types
+-- that tracks all references they close over.
+{-
+append : & 'a Str -> Str -> Str
+append r s = ...
+
+-- reference to `a` escapes scope of `a`
+trust : World -> Str -o (World , Str)
+trust w s = let (w' , a) = readLine w in
+  toMultFun (append &a s)
+
+-- Automatic conversion of multi-use functions `->` to single-use functions `-o`.
+toMultFn : (a -> a) -> a -o a
+toMultFn f x = f x
+-}
+-- To fix this I'll use:
+-- | append : & 'a Str -> Str -['a]> Str
+-- Where the ['a] in -['a]> indicates the lifetimes of the references it closes
+-- over. I'll need to add a lifetime intersection operator to the type level, so
+-- that generics can erase the fact that there are multiple lifetimes involved.
+-- Any references with an intersection lifetime will simply be impossible.
+--
+-- I think the way I'll have to handle it is to have essentially a multiplicity
+-- context indexed by the normal context where for every term variable I indicate
+-- whether it's been referenced or not. All terms will be indexed by this new
+-- context. I'll have a function that converts lifetimes to this new context. That
+-- way I can basically say that the lifetime given to a function type has to
+-- resolve to the same as the lifetime context indexing the term. I'll also
+-- need a union operator for things like if-then-else, application, etc.
+--
+-- I'll probably do all of this in a new file, referencing the old as I go.
+infixl 4 _,^_
+{-
+I need a way to remove a reference, to say "this reference has gone out of scope."
+-}
+data RefCtx : Ctx → Set where
+  ∅ : RefCtx ∅
+  _,*_ : ∀ {Γ} → RefCtx Γ → (K : Kind) → RefCtx (Γ ,* K)
+  -- Indicates it has not been used as a reference.
+  _,_ : ∀ {Γ} → RefCtx Γ → (A : Γ ⊢* Type*) → RefCtx (Γ , A)
+  -- indicates it has been used as a reference.
+  _,^_ : ∀ {Γ} → RefCtx Γ → (A : Γ ⊢* Type*) → RefCtx (Γ , A)
+
+
+addRef : ∀ {Φ} → RefCtx Φ → TermVar Φ → RefCtx Φ
+addRef (Γ ,* K) (SK i) = addRef Γ i ,* K
+addRef (Γ , A) EZ = Γ ,^ A
+addRef (Γ , A) (ST i) = addRef Γ i , A
+addRef (Γ ,^ A) EZ = Γ ,^ A
+addRef (Γ ,^ A) (ST i) = addRef Γ i ,^ A
+
+noRefs : ∀ Φ → RefCtx Φ
+noRefs Φ = {!!}
+
+-- Convert a lifetime to a reference.
+lt2ref : ∀ {Φ} → Φ ⊢* Life* → RefCtx Φ
+lt2ref L = {!!}
+
+-- Convert a term variable to a reference.
+tv2ref : ∀ {Φ A} → Φ ∋ A → RefCtx Φ
+tv2ref i = {!!}
+
+{-
+module CustomTactic where
+  open import Data.Unit
+  open import Reflection
+  open import Data.List
+  open import Data.Nat
+
+  infer⊇-tactic : Term → TC ⊤
+  infer⊇-tactic hole = do
+    rf ← (quoteTC refl⊇)
+    catchTC (unify hole rf) fallback
+    where
+    searchEnv : Type → List Type → ℕ → TC ⊤
+    searchEnv ty [] n = return tt
+    searchEnv ty (ty' ∷ xs) n = catchTC
+      (do
+        unify ty ty'
+        v ← unquoteTC (var n [])
+        unify hole v)
+      (searchEnv ty xs (n + 1))
+
+    extractTy : Arg Type → Type
+    extractTy (arg ai t) = t
+    fallback : TC ⊤
+    fallback = do
+      ty ← inferType hole
+      ctx ← getContext
+      let ctx' = map extractTy ctx
+      searchEnv ty ctx' 0
+open CustomTactic
+-}
+
+infixl 4 _∪_
+_∪_ : ∀ {Φ} → RefCtx Φ → RefCtx Φ → RefCtx Φ
+∅ ∪ ∅ = ∅
+(Γ ,* K) ∪ (Δ ,* .K) = (Γ ∪ Δ) ,* K
+(Γ , A) ∪ (Δ , .A) = (Γ ∪ Δ) , A
+(Γ ,^ A) ∪ (Δ , .A) = (Γ ∪ Δ) ,^ A
+(Γ , A) ∪ (Δ ,^ .A) = (Γ ∪ Δ) ,^ A
+(Γ ,^ A) ∪ (Δ ,^ .A) = (Γ ∪ Δ) ,^ A
+
+join : ∀ {Φ Ψ} (ss : Φ ⊇ Ψ) → RefCtx Φ → RefCtx Ψ → RefCtx Ψ
+join ss rc1 rc2 = (strengthenRC ss rc1) ∪ rc2
+  where
+  strengthenRC : ∀ {C1 C2} → C1 ⊇ C2 → RefCtx C1 → RefCtx C2
+  strengthenRC refl⊇ Γ = Γ
+  strengthenRC (keepK⊇ ss) (Γ ,* K) = strengthenRC ss Γ ,* K
+  strengthenRC (skipT⊇ ss) (Γ , _) = {!!}
+  -- TODO: I need to integrate RefCtx into _⊇_, and possibly into the before
+  -- and after contexts of a term, since references can go out of scope.
+  strengthenRC (skipT⊇ ss) (Γ ,^ _) = {!!}
+  strengthenRC (keepT⊇ ss x) (Γ , _) = {!!}
+  strengthenRC (keepT⊇ ss x) (Γ ,^ _) = {!!}
+
+peelKRef : ∀ {Φ K} → RefCtx (Φ ,* K) → RefCtx Φ
+peelKRef rc = {!!}
+
+data _⊢_!_ Φ : Φ ⊢* Type* → (Ψ : Ctx) → {Φ ⊇ Ψ} → {RefCtx Ψ} → Set where
   -- boolean terms
-  #true : _⊢_!_ Φ 𝔹 Φ {refl⊇}
-  #false : _⊢_!_ Φ 𝔹 Φ {refl⊇}
+  #true : _⊢_!_ Φ 𝔹 Φ {refl⊇} {noRefs Φ}
+  #false : _⊢_!_ Φ 𝔹 Φ {refl⊇} {noRefs Φ}
   -- if then else
-  #if_then_else_ : ∀ {Ψ Θ ss1 ss2 A}
-    → _⊢_!_ Φ 𝔹 Ψ {ss1}
-    → _⊢_!_ Ψ (weaken⊇ ss2 A) Θ {ss2}
-    → _⊢_!_ Ψ (weaken⊇ ss2 A) Θ {ss2}
-    → (let ss = comp⊇ ss1 ss2 in _⊢_!_ Φ (weaken⊇ ss A) Θ {ss})
+  #if_then_else_ : ∀ {Ψ Θ ss1 ss2 A R1 R2 R3}
+    → _⊢_!_ Φ 𝔹 Ψ {ss1} {R1}
+    → _⊢_!_ Ψ (weaken⊇ ss2 A) Θ {ss2} {R2}
+    → _⊢_!_ Ψ (weaken⊇ ss2 A) Θ {ss2} {R3}
+    → (let ss = comp⊇ ss1 ss2 in _⊢_!_ Φ (weaken⊇ ss A) Θ {ss} {join ss2 R1 (R2 ∪ R3)})
   -- consume a term variable
-  #use : ∀ {Ψ A} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Φ A Ψ {conv⊇ u}
+  #use : ∀ {Ψ A} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Φ A Ψ {conv⊇ u} {noRefs Ψ}
   -- Inspect a reference term variable without consuming it.
-  #ref : ∀ {L A} → (r : Φ ∋r *& L A) → _⊢_!_ Φ (*& L A) Φ {refl⊇}
-  -- drop a variable without doing anything with it.
-  #drop : ∀ {Ψ Θ A B ss} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Ψ B Θ {ss}
-    → _⊢_!_ Φ (weaken⊇ (conv⊇ u) B) Θ {comp⊇ (conv⊇ u) ss}
+  #ref : ∀ {L A} → (r : Φ ∋ *& L A) → _⊢_!_ Φ (*& L A) Φ {refl⊇} {lt2ref L}
+  -- drop a variable without doing anything with it before the term.
+  -- TODO: I may want to add a drop clause for after a term. (I could
+  -- mimic that with let in as well.)
+  #drop : ∀ {Ψ Θ A B ss R} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Ψ B Θ {ss} {R}
+    → _⊢_!_ Φ (weaken⊇ (conv⊇ u) B) Θ {comp⊇ (conv⊇ u) ss} {R}
   -- take a reference to a variable without consuming it.
-  #& : ∀ {A} → (i : Φ ∋ A) → _⊢_!_ Φ (*& (*' (eraseTV i)) A) Φ {refl⊇}
+  #& : ∀ {A} → (i : Φ ∋ A) → _⊢_!_ Φ (*& (*' (eraseTV i)) A) Φ {refl⊇} {tv2ref i}
   -- term lambda (one use)
-  #λ : ∀ {Ψ A B ss} → _⊢_!_ (Φ , B) (weakenT* A) Ψ {skipT⊇ ss} → _⊢_!_ Φ (B ⇒ A) Ψ {ss}
+  #λ : ∀ {Ψ A B ss R} → _⊢_!_ (Φ , B) (weakenT* A) Ψ {skipT⊇ ss} {R} → _⊢_!_ Φ (B ⇒ A) Ψ {ss} {R}
   -- term lambda (multiple use)
-  #λr : ∀ {A B} → _⊢_!_ (Φ , B) (weakenT* A) Φ {skipT⊇ refl⊇} → _⊢_!_ Φ (B r⇒ A) Φ {refl⊇}
+  #λr : ∀ {A B R} → _⊢_!_ (Φ , B) (weakenT* A) Φ {skipT⊇ refl⊇} {R} → _⊢_!_ Φ (B r⇒ A) Φ {refl⊇} {R}
   -- term app (consumes function)
-  _·_ : ∀ {Ψ Θ A ss1 ss2} {B : Ψ ⊢* Type*} → _⊢_!_ Φ (weaken⊇ ss1 B ⇒ A) Ψ {ss1}
-    → _⊢_!_ Ψ B Θ {ss2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2}
+  _·_ : ∀ {Ψ Θ A ss1 ss2 R1 R2} {B : Ψ ⊢* Type*} → _⊢_!_ Φ (weaken⊇ ss1 B ⇒ A) Ψ {ss1} {R1}
+    → _⊢_!_ Ψ B Θ {ss2} {R2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2} {join ss2 R1 R2}
   -- term app (doesn't consume function)
-  _·r_ : ∀ {Ψ Θ L A B ss1 ss2} → _⊢_!_ Φ (*& L (weaken⊇ ss1 B r⇒ A)) Ψ {ss1}
-    → _⊢_!_ Ψ B Θ {ss2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2}
+  _·r_ : ∀ {Ψ Θ L A B ss1 ss2 R1 R2} → _⊢_!_ Φ (*& L (weaken⊇ ss1 B r⇒ A)) Ψ {ss1} {R1}
+    → _⊢_!_ Ψ B Θ {ss2} {R2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2} {join ss2 R1 R2}
   -- type forall
   -- Note that `K`, since it's a type variable and thus can't be
   -- dropped from the context, needs to also occur in the output.
-  -- TODO: figure out a better solution than this clumsy peelK⊇ hack.
-  Λ : ∀ {Ψ K A ss} → _⊢_!_ (Φ ,* K) A (Ψ ,* K) {ss}
-    → _⊢_!_ Φ (*∀ A) Ψ {peelK⊇ ss}
+  Λ : ∀ {Ψ K A ss R} → _⊢_!_ (Φ ,* K) A (Ψ ,* K) {ss} {R}
+    → _⊢_!_ Φ (*∀ A) Ψ {peelK⊇ ss} {peelKRef R}
   -- type application (forall)
-  _·*_ : ∀ {Ψ K A ss} → _⊢_!_ Φ (*∀ A) Ψ {ss} → (B : Ψ ⊢* K)
-    → _⊢_!_ Φ (A [ weaken⊇ ss B ]*) Ψ {ss}
+  _·*_ : ∀ {Ψ K A ss R} → _⊢_!_ Φ (*∀ A) Ψ {ss} {R} → (B : Ψ ⊢* K)
+    → _⊢_!_ Φ (A [ weaken⊇ ss B ]*) Ψ {ss} {R}
   -- type conversion
-  #cast : ∀ {Ψ A B ss} → A ≡β B → _⊢_!_ Φ A Ψ {ss} → _⊢_!_ Φ B Ψ {ss}
+  #cast : ∀ {Ψ A B ss R} → A ≡β B → _⊢_!_ Φ A Ψ {ss} {R} → _⊢_!_ Φ B Ψ {ss} {R}
+
+-- Demonstration of the escape problem in this calculus:
+problem : (∅ , 𝔹) ⊢ 𝔹 ! ∅
+problem = gets2nd · (#drop UZ #true)
+  where
+  -- imagine if instead of dropping the reference this matched on
+  -- or otherwise read the reference. In this case, imagine you clone
+  -- the boolean to return it as the final result; you could return
+  -- the closure and call it later when that boolean is out of scope.
+  takesRef : (∅ , 𝔹) ⊢ ((*& (*' EZ) 𝔹) r⇒ (𝔹 ⇒ 𝔹)) ! (∅ , 𝔹)
+  takesRef = (#λr (#λ (#drop (UT UZ drop-𝔹) (#use UZ))))
+  gets2nd : (∅ , 𝔹) ⊢ 𝔹 ⇒ 𝔹 ! (∅ , 𝔹)
+  gets2nd = (#λ ((#& TZ) ·r (#drop UZ (#& TZ)))) · takesRef
 
 andBool : ∅ ⊢ (𝔹 ⇒ (𝔹 ⇒ 𝔹)) ! ∅
 andBool = #λ (#λ (#if (#use (UT UZ drop-𝔹)) then (#use UZ) else (#drop UZ #false)))
