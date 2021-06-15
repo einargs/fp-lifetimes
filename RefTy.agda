@@ -6,6 +6,8 @@ open Eq using (_≡_; refl; trans; sym; cong; cong-app; subst; cong₂)
 open import Data.Sum using (_⊎_; inj₁; inj₂)
 open import Data.Product using (_×_) renaming (_,_ to <_,_>)
 open import Relation.Nullary using (¬_)
+open import Data.List using (List; []; _∷_)
+open import Data.List.NonEmpty using (_∷_; List⁺; _⁺++⁺_)
 
 data Kind : Set where
   -- the kind of types that directly classify terms.
@@ -41,23 +43,30 @@ _∋*_ : Ctx → Kind → Set
 TermVar : Ctx → Set
 TermVar = InCtx ErasedTermVarTag
 
-infixr 6 _⇒_
-infixr 6 _r⇒_
+infixr 6 _[_]⊸_
+infixr 6 _[_]⇒_
+infixl 6 _*∩_
 
 infix 4 _⊢*_
 data _⊢*_ Γ where
+  -- Boolean type
   𝔹 : Γ ⊢* Type*
+  -- Static lifetime; the identity of lifetimes over intersection.
+  *'static : Γ ⊢* Life*
+  -- Type variables.
   *var : ∀ {K} → Γ ∋* K → Γ ⊢* K
   -- lifetime of the given term variable
   *' : TermVar Γ → Γ ⊢* Life*
+  -- Intersection of two lifetimes.
+  _*∩_ : Γ ⊢* Life* → Γ ⊢* Life* → Γ ⊢* Life*
   -- reference to a variable of the given type.
   -- We don't combine `*'` with it because we need *var to
   -- also work.
   *& : Γ ⊢* Life* → Γ ⊢* Type* → Γ ⊢* Type*
   -- The type of single use functions.
-  _⇒_ : Γ ⊢* Type* → Γ ⊢* Type* → Γ ⊢* Type*
+  _[_]⊸_ : Γ ⊢* Type* → Γ ⊢* Life* → Γ ⊢* Type* → Γ ⊢* Type*
   -- The type of re-usable functions.
-  _r⇒_ : Γ ⊢* Type* → Γ ⊢* Type* → Γ ⊢* Type*
+  _[_]⇒_ : Γ ⊢* Type* → Γ ⊢* Life* → Γ ⊢* Type* → Γ ⊢* Type*
   _·*_ : ∀ {J K} → Γ ⊢* K ⇒* J → Γ ⊢* K → Γ ⊢* J
   *λ : ∀ {J K} → Γ ,* K ⊢* J → Γ ⊢* K ⇒* J
   *∀ : ∀ {K} → Γ ,* K ⊢* Type* → Γ ⊢* Type*
@@ -74,11 +83,13 @@ lift* p (SK i) = SK (p i)
 -- Renaming of type variables in types.
 ren* : ∀ {Φ Ψ} → Ren* Φ Ψ → ∀ {K} → Φ ⊢* K → Ψ ⊢* K
 ren* p 𝔹 = 𝔹
+ren* p *'static = *'static
 ren* p (*var x) = *var (p x)
 ren* p (*' x) = *' (p x)
+ren* p (L1 *∩ L2) = ren* p L1 *∩ ren* p L2
 ren* p (*& A1 A2) = *& (ren* p A1) (ren* p A2)
-ren* p (A1 ⇒ A2) = ren* p A1 ⇒ ren* p A2
-ren* p (A1 r⇒ A2) = ren* p A1 r⇒ ren* p A2
+ren* p (A1 [ L ]⊸ A2) = ren* p A1 [ ren* p L ]⊸ ren* p A2
+ren* p (A1 [ L ]⇒ A2) = ren* p A1 [ ren* p L ]⇒ ren* p A2
 ren* p (A1 ·* A2) = ren* p A1 ·* ren* p A2
 ren* p (*λ A) = *λ (ren* (lift* p) A)
 ren* p (*∀ A) = *∀ (ren* (lift* p) A)
@@ -104,11 +115,13 @@ lifts* {Φ} {Ψ} s {K} {ErasedTermVarTag} (SK i) = SK (s {ErasedTermVarTag} i)
 
 sub* : ∀ {Φ Ψ} → Sub* Φ Ψ → ∀ {K} → Φ ⊢* K → Ψ ⊢* K
 sub* s 𝔹 = 𝔹
+sub* s *'static = *'static
 sub* s (*var i) = s {TypeVarTag _} i
 sub* s (*' i) = *' (s {ErasedTermVarTag} i)
+sub* s (L1 *∩ L2) = sub* s L1 *∩ sub* s L2
 sub* s (*& A1 A2) = *& (sub* s A1) (sub* s A2)
-sub* s (A1 ⇒ A2) = sub* s A1 ⇒ sub* s A2
-sub* s (A1 r⇒ A2) = sub* s A1 r⇒ sub* s A2
+sub* s (A1 [ L ]⊸ A2) = sub* s A1 [ sub* s L ]⊸ sub* s A2
+sub* s (A1 [ L ]⇒ A2) = sub* s A1 [ sub* s L ]⇒ sub* s A2
 sub* s (A1 ·* A2) = sub* s A1 ·* sub* s A2
 sub* s (*λ A) = *λ (sub* (lifts* s) A)
 sub* s (*∀ A) = *∀ (sub* (lifts* s) A)
@@ -151,12 +164,14 @@ data _≡β_ {Γ} : ∀ {K} → Γ ⊢* K → Γ ⊢* K → Set where
     → A ≡β B → B ≡β C → A ≡β C
 
   -- congruence rules
+  *∩≡β : {A A' B B' : Γ ⊢* Life*}
+    → A ≡β A' → B ≡β B' → (A *∩ B) ≡β (A' *∩ B')
   *&≡β : {L L' : Γ ⊢* Life*} {A A' : Γ ⊢* Type*}
     → L ≡β L' → A ≡β A' → (*& L A) ≡β (*& L' A')
-  ⇒≡β : {A A' B B' : Γ ⊢* Type*}
-    → A ≡β A' → B ≡β B' → (A ⇒ B) ≡β (A' ⇒ B')
-  r⇒≡β : {A A' B B' : Γ ⊢* Type*}
-    → A ≡β A' → B ≡β B' → (A r⇒ B) ≡β (A' r⇒ B')
+  ⊸≡β : {A A' B B' : Γ ⊢* Type*} {L L' : Γ ⊢* Life*}
+    → A ≡β A' → B ≡β B' → L ≡β L' → (A [ L ]⇒ B) ≡β (A' [ L' ]⇒ B')
+  ⇒≡β : {A A' B B' : Γ ⊢* Type*} {L L' : Γ ⊢* Life*}
+    → A ≡β A' → B ≡β B' → L ≡β L' → (A [ L ]⇒ B) ≡β (A' [ L' ]⇒ B')
   ·*≡β : ∀ {K J} {A A' : Γ ⊢* K ⇒* J} {B B' : Γ ⊢* K}
     → A ≡β A' → B ≡β B' → (A ·* B) ≡β (A' ·* B')
   *λ≡β : ∀ {K J} {B B' : Γ ,* J ⊢* K}
@@ -186,16 +201,21 @@ data _⊇_ where
 
 data RestrictType where
   drop-𝔹 : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} → RestrictType ss 𝔹 𝔹
+  drop-*'static : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} → RestrictType ss *'static *'static
   drop-*var : ∀ {Φ Ψ K} {ss : Φ ⊇ Ψ} {i i'} → RestrictVar ss i i'
     → RestrictType {Φ} {Ψ} {K} ss (*var i) (*var i')
   drop-*' : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} {i i'} → RestrictVar ss i i'
     → RestrictType ss (*' i) (*' i')
   drop-*& : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} {L L' A A'} → RestrictType ss L L'
     → RestrictType ss A A' → RestrictType ss (*& L A) (*& L' A')
-  drop-⇒ : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} {A A' B B'} → RestrictType ss A A'
-    → RestrictType ss B B' → RestrictType ss (A ⇒ B) (A' ⇒ B')
-  drop-r⇒ : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} {A A' B B'} → RestrictType ss A A'
-    → RestrictType ss B B' → RestrictType ss (A r⇒ B) (A' r⇒ B')
+  drop-*∩ : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} {L L' M M'} → RestrictType ss L L'
+    → RestrictType ss M M' → RestrictType ss (L *∩ M) (L' *∩ M')
+  drop-⊸ : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} {A A' B B' L L'} → RestrictType ss A A'
+    → RestrictType ss L L' → RestrictType ss B B'
+    → RestrictType ss (A [ L ]⊸ B) (A' [ L' ]⊸ B')
+  drop-⇒ : ∀ {Φ Ψ} {ss : Φ ⊇ Ψ} {A A' B B' L L'} → RestrictType ss A A'
+    → RestrictType ss L L' → RestrictType ss B B'
+    → RestrictType ss (A [ L ]⇒ B) (A' [ L' ]⇒ B')
   drop-·* : ∀ {Φ Ψ J K} {ss : Φ ⊇ Ψ} {A : Φ ⊢* K ⇒* J} {A' : Ψ ⊢* K ⇒* J}
     {B : Φ ⊢* K} {B' : Ψ ⊢* K} → RestrictType ss A A'
     → RestrictType ss B B' → RestrictType ss (A ·* B) (A' ·* B')
@@ -231,14 +251,17 @@ comp⊇ (keepT⊇ ss rt) refl⊇ = keepT⊇ ss rt
 comp⊇ (skipT⊇ ss1) ss2 = skipT⊇ (comp⊇ ss1 ss2)
 
 compT⊇ drop-𝔹 drop-𝔹 = drop-𝔹
+compT⊇ drop-*'static drop-*'static = drop-*'static
 compT⊇ (drop-*var rv1) (drop-*var rv2) = drop-*var (compV⊇ rv1 rv2)
 compT⊇ (drop-*' rv1) (drop-*' rv2) = drop-*' (compV⊇ rv1 rv2)
 compT⊇ {Φ} {Ψ} {Θ} (drop-*& rt1 rt3) (drop-*& rt2 rt4) =
   drop-*& (compT⊇ rt1 rt2) (compT⊇ rt3 rt4)
-compT⊇ (drop-⇒ rt1 rt3) (drop-⇒ rt2 rt4) =
-  drop-⇒ (compT⊇ rt1 rt2) (compT⊇ rt3 rt4)
-compT⊇ (drop-r⇒ rt1 rt3) (drop-r⇒ rt2 rt4) =
-  drop-r⇒ (compT⊇ rt1 rt2) (compT⊇ rt3 rt4)
+compT⊇ (drop-*∩ rt1 rt3) (drop-*∩ rt2 rt4) =
+  drop-*∩ (compT⊇ rt1 rt2) (compT⊇ rt3 rt4)
+compT⊇ (drop-⊸ rt1 rt3 rt5) (drop-⊸ rt2 rt4 rt6) =
+  drop-⊸ (compT⊇ rt1 rt2) (compT⊇ rt3 rt4) (compT⊇ rt5 rt6)
+compT⊇ (drop-⇒ rt1 rt3 rt5) (drop-⇒ rt2 rt4 rt6) =
+  drop-⇒ (compT⊇ rt1 rt2) (compT⊇ rt3 rt4) (compT⊇ rt5 rt6)
 compT⊇ (drop-·* rt1 rt3) (drop-·* rt2 rt4) =
   drop-·* (compT⊇ rt1 rt2) (compT⊇ rt3 rt4)
 compT⊇ (drop-*λ rt1) (drop-*λ rt2) = drop-*λ (compT⊇ rt1 rt2)
@@ -266,11 +289,13 @@ weakenV⊇ (keepT⊇ ss rt) (ST i) = ST (weakenV⊇ ss i)
 
 weaken⊇ : ∀ {Φ Ψ K} → Φ ⊇ Ψ → Ψ ⊢* K → Φ ⊢* K
 weaken⊇ ss 𝔹 = 𝔹
+weaken⊇ ss *'static = *'static
 weaken⊇ ss (*var x) = *var (weakenV⊇ ss x)
 weaken⊇ ss (*' x) = *' (weakenV⊇ ss x)
 weaken⊇ ss (*& A1 A2) = *& (weaken⊇ ss A1) (weaken⊇ ss A2)
-weaken⊇ ss (A1 ⇒ A2) = weaken⊇ ss A1 ⇒ weaken⊇ ss A2
-weaken⊇ ss (A1 r⇒ A2) = weaken⊇ ss A1 r⇒ weaken⊇ ss A2
+weaken⊇ ss (L1 *∩ L2) = weaken⊇ ss L1 *∩ weaken⊇ ss L2
+weaken⊇ ss (A1 [ L ]⊸ A2) = weaken⊇ ss A1 [ weaken⊇ ss L ]⊸ weaken⊇ ss A2
+weaken⊇ ss (A1 [ L ]⇒ A2) = weaken⊇ ss A1 [ weaken⊇ ss L ]⇒ weaken⊇ ss A2
 weaken⊇ ss (A1 ·* A2) = weaken⊇ ss A1 ·* weaken⊇ ss A2
 weaken⊇ ss (*λ A) = *λ (weaken⊇ (keepK⊇ ss) A)
 weaken⊇ ss (*∀ A) = *∀ (weaken⊇ (keepK⊇ ss) A)
@@ -307,8 +332,9 @@ data RefdIn : ∀ {Φ K} → Φ ⊢* K → TermVar Φ → Set where
   refd-*' : ∀ {Φ tv} → RefdIn {Φ} (*' tv) tv
   refd-*&1 : ∀ {Φ tv L A} → RefdIn {Φ} L tv → RefdIn (*& L A) tv
   refd-*&2 : ∀ {Φ tv L A} → RefdIn {Φ} A tv → RefdIn (*& L A) tv
-  -- We ignore references in return or argument of functions;
-  -- TODO: use function-attached lifetime info.
+  -- We ignore references in return or argument of functions.
+  refd-⊸ : ∀ {Φ tv A L B} → RefdIn {Φ} L tv → RefdIn (A [ L ]⊸ B) tv
+  refd-⇒ : ∀ {Φ tv A L B} → RefdIn {Φ} L tv → RefdIn (A [ L ]⇒ B) tv
   refd-·*1 : ∀ {Φ tv J K} {A : Φ ⊢* J ⇒* K} {B : Φ ⊢* J}
     → RefdIn {Φ} A tv → RefdIn (A ·* B) tv
   refd-·*2 : ∀ {Φ tv J K} {A : Φ ⊢* J ⇒* K} {B : Φ ⊢* J}
@@ -346,50 +372,66 @@ pre2tv {Φ} preCtx = f preCtx EZ
   f (pre-dropT A pc) i = f pc (ST i)
 
 -- Counts all referrers.
-data Referrers (Φ : Ctx) (tv : TermVar Φ) : Set where
-  RootRef : ∀ {A} {referrer : Φ ∋ A} → Refd referrer tv → Referrers Φ tv
-  ConsRef : Referrers Φ tv → ∀ {A} {referrer : Φ ∋ A}
-    → Refd referrer tv → Referrers Φ tv
+data Referrer (Φ : Ctx) (tv : TermVar Φ) : Set where
+  referrer : ∀ {A} {i : Φ ∋ A} → Refd i tv → Referrer Φ tv
 
-data Ctx# (Φ : Ctx) : (Ψ : Ctx) → {PreCtx Φ Ψ} → Set where
-  ∅ : Ctx# Φ ∅ {pre∅ Φ}
-  ConK : ∀ {K Ψ pc} → Ctx# Φ Ψ {pre-dropK K pc} → Ctx# Φ (Ψ ,* K) {pc}
-  ConFree : ∀ {Ψ A pc} → Ctx# Φ Ψ {pre-dropT A pc}
-    → Droppable (pre2tv pc) → Ctx# Φ (Ψ , A) {pc}
-  ConRefd : ∀ {Ψ A pc} → Ctx# Φ Ψ {pre-dropT A pc}
-    → Referrers Φ (pre2tv pc) → Ctx# Φ (Ψ , A) {pc}
+data MultCtx (Φ : Ctx) : (Ψ : Ctx) → {PreCtx Φ Ψ} → Set where
+  ∅ : MultCtx Φ ∅ {pre∅ Φ}
+  ConK : ∀ {K Ψ pc} → MultCtx Φ Ψ {pre-dropK K pc} → MultCtx Φ (Ψ ,* K) {pc}
+  ConFree : ∀ {Ψ A pc} → MultCtx Φ Ψ {pre-dropT A pc}
+    → Droppable (pre2tv pc) → MultCtx Φ (Ψ , A) {pc}
+  ConRefd : ∀ {Ψ A pc} → MultCtx Φ Ψ {pre-dropT A pc}
+    → List⁺ (Referrer Φ (pre2tv pc)) → MultCtx Φ (Ψ , A) {pc}
 
--- TODO: I need to add a reference/lifetime parameter to function types
--- that tracks all references they close over.
+Ctx# : Ctx → Set
+Ctx# Φ = MultCtx Φ Φ {pre-refl}
+
+data _⊢_!_ {Φ} (Γ : Ctx# Φ) : Φ ⊢* Type* → ∀ {Ψ} → Ctx# Ψ → {Φ ⊇ Ψ} → Set where
+  -- boolean terms
+  #true : _⊢_!_ Γ 𝔹 Γ {refl⊇}
+  #false : _⊢_!_ Γ 𝔹 Γ {refl⊇}
+  -- if then else
+  #if_then_else_ : ∀ {Ψ Θ ss1 ss2 A} {Δ : Ctx# Ψ} {Ε : Ctx# Θ}
+    → _⊢_!_ Γ 𝔹 Δ {ss1}
+    → _⊢_!_ Δ (weaken⊇ ss2 A) Ε {ss2}
+    → _⊢_!_ Δ (weaken⊇ ss2 A) Ε {ss2}
+    → (let ss = comp⊇ ss1 ss2 in _⊢_!_ Γ (weaken⊇ ss A) Ε {ss})
+  -- consume a term variable
+  #use : ∀ {Ψ A} {Δ : Ctx# Ψ} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Γ A Δ {conv⊇ u}
+  {-
+  -- Inspect a reference term variable without consuming it.
+  #ref : ∀ {L A} → (r : Φ ∋ *& L A) → _⊢_!_ Φ (*& L A) Φ {refl⊇} {lt2ref L}
+  -- drop a variable without doing anything with it before the term.
+  -- TODO: I may want to add a drop clause for after a term. (I could
+  -- mimic that with let in as well.)
+  #drop : ∀ {Ψ Θ A B ss R} → (u : Φ ∋ A ! Ψ) → _⊢_!_ Ψ B Θ {ss} {R}
+    → _⊢_!_ Φ (weaken⊇ (conv⊇ u) B) Θ {comp⊇ (conv⊇ u) ss} {R}
+  -- take a reference to a variable without consuming it.
+  #& : ∀ {A} → (i : Φ ∋ A) → _⊢_!_ Φ (*& (*' (eraseTV i)) A) Φ {refl⊇} {tv2ref i}
+  -- term lambda (one use)
+  #λ : ∀ {Ψ A B ss R} → _⊢_!_ (Φ , B) (weakenT* A) Ψ {skipT⊇ ss} {R} → _⊢_!_ Φ (B ⇒ A) Ψ {ss} {R}
+  -- term lambda (multiple use)
+  #λr : ∀ {A B R} → _⊢_!_ (Φ , B) (weakenT* A) Φ {skipT⊇ refl⊇} {R} → _⊢_!_ Φ (B r⇒ A) Φ {refl⊇} {R}
+  -- term app (consumes function)
+  _·_ : ∀ {Ψ Θ A ss1 ss2 R1 R2} {B : Ψ ⊢* Type*} → _⊢_!_ Φ (weaken⊇ ss1 B ⇒ A) Ψ {ss1} {R1}
+    → _⊢_!_ Ψ B Θ {ss2} {R2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2} {join ss2 R1 R2}
+  -- term app (doesn't consume function)
+  _·r_ : ∀ {Ψ Θ L A B ss1 ss2 R1 R2} → _⊢_!_ Φ (*& L (weaken⊇ ss1 B r⇒ A)) Ψ {ss1} {R1}
+    → _⊢_!_ Ψ B Θ {ss2} {R2} → _⊢_!_ Φ A Θ {comp⊇ ss1 ss2} {join ss2 R1 R2}
+  -- type forall
+  -- Note that `K`, since it's a type variable and thus can't be
+  -- dropped from the context, needs to also occur in the output.
+  Λ : ∀ {Ψ K A ss R} → _⊢_!_ (Φ ,* K) A (Ψ ,* K) {ss} {R}
+    → _⊢_!_ Φ (*∀ A) Ψ {peelK⊇ ss} {peelKRef R}
+  -- type application (forall)
+  _·*_ : ∀ {Ψ K A ss R} → _⊢_!_ Φ (*∀ A) Ψ {ss} {R} → (B : Ψ ⊢* K)
+    → _⊢_!_ Φ (A [ weaken⊇ ss B ]*) Ψ {ss} {R}
+  -- type conversion
+  #cast : ∀ {Ψ A B ss R} → A ≡β B → _⊢_!_ Φ A Ψ {ss} {R} → _⊢_!_ Φ B Ψ {ss} {R}
+  -}
+
 {-
-append : & 'a Str -> Str -> Str
-append r s = ...
-
--- reference to `a` escapes scope of `a`
-trust : World -> Str -o (World , Str)
-trust w s = let (w' , a) = readLine w in
-  toMultFun (append &a s)
-
--- Automatic conversion of multi-use functions `->` to single-use functions `-o`.
-toMultFn : (a -> a) -> a -o a
-toMultFn f x = f x
--}
--- To fix this I'll use:
--- | append : & 'a Str -> Str -['a]> Str
--- Where the ['a] in -['a]> indicates the lifetimes of the references it closes
--- over. I'll need to add a lifetime intersection operator to the type level, so
--- that generics can erase the fact that there are multiple lifetimes involved.
--- Any references with an intersection lifetime will simply be impossible.
---
--- I think the way I'll have to handle it is to have essentially a multiplicity
--- context indexed by the normal context where for every term variable I indicate
--- whether it's been referenced or not. All terms will be indexed by this new
--- context. I'll have a function that converts lifetimes to this new context. That
--- way I can basically say that the lifetime given to a function type has to
--- resolve to the same as the lifetime context indexing the term. I'll also
--- need a union operator for things like if-then-else, application, etc.
---
--- I'll probably do all of this in a new file, referencing the old as I go.
+{-
 infixl 4 _,^_
 {-
 I need a way to remove a reference, to say "this reference has gone out of scope."
@@ -401,7 +443,6 @@ data RefCtx : Ctx → Set where
   _,_ : ∀ {Γ} → RefCtx Γ → (A : Γ ⊢* Type*) → RefCtx (Γ , A)
   -- indicates it has been used as a reference.
   _,^_ : ∀ {Γ} → RefCtx Γ → (A : Γ ⊢* Type*) → RefCtx (Γ , A)
-
 
 addRef : ∀ {Φ} → RefCtx Φ → TermVar Φ → RefCtx Φ
 addRef (Γ ,* K) (SK i) = addRef Γ i ,* K
@@ -420,38 +461,6 @@ lt2ref L = {!!}
 -- Convert a term variable to a reference.
 tv2ref : ∀ {Φ A} → Φ ∋ A → RefCtx Φ
 tv2ref i = {!!}
-
-{-
-module CustomTactic where
-  open import Data.Unit
-  open import Reflection
-  open import Data.List
-  open import Data.Nat
-
-  infer⊇-tactic : Term → TC ⊤
-  infer⊇-tactic hole = do
-    rf ← (quoteTC refl⊇)
-    catchTC (unify hole rf) fallback
-    where
-    searchEnv : Type → List Type → ℕ → TC ⊤
-    searchEnv ty [] n = return tt
-    searchEnv ty (ty' ∷ xs) n = catchTC
-      (do
-        unify ty ty'
-        v ← unquoteTC (var n [])
-        unify hole v)
-      (searchEnv ty xs (n + 1))
-
-    extractTy : Arg Type → Type
-    extractTy (arg ai t) = t
-    fallback : TC ⊤
-    fallback = do
-      ty ← inferType hole
-      ctx ← getContext
-      let ctx' = map extractTy ctx
-      searchEnv ty ctx' 0
-open CustomTactic
--}
 
 infixl 4 _∪_
 _∪_ : ∀ {Φ} → RefCtx Φ → RefCtx Φ → RefCtx Φ
@@ -477,7 +486,11 @@ join ss rc1 rc2 = (strengthenRC ss rc1) ∪ rc2
 
 peelKRef : ∀ {Φ K} → RefCtx (Φ ,* K) → RefCtx Φ
 peelKRef rc = {!!}
-
+-}
+-- TODO: this approach might not work because it doesn't take into account that you
+-- could use a reference in the middle of a function, then drop it. It wouldn't show
+-- up, but would still cause problems. Maybe I need to just write a function that
+-- counts references in a term inside a function?
 data _⊢_!_ Φ : Φ ⊢* Type* → (Ψ : Ctx) → {Φ ⊇ Ψ} → {RefCtx Ψ} → Set where
   -- boolean terms
   #true : _⊢_!_ Φ 𝔹 Φ {refl⊇} {noRefs Φ}
@@ -556,3 +569,36 @@ test = #cast conv (#λ (#use UZ))
   conv = sym≡β (β≡β
     ((*& (*var KZ) 𝔹) ⇒ (*& (*var KZ) 𝔹))
     (*' EZ))
+-}
+
+{-
+module CustomTactic where
+open import Data.Unit
+open import Reflection
+open import Data.List
+open import Data.Nat
+
+infer⊇-tactic : Term → TC ⊤
+infer⊇-tactic hole = do
+rf ← (quoteTC refl⊇)
+catchTC (unify hole rf) fallback
+where
+searchEnv : Type → List Type → ℕ → TC ⊤
+searchEnv ty [] n = return tt
+searchEnv ty (ty' ∷ xs) n = catchTC
+(do
+unify ty ty'
+v ← unquoteTC (var n [])
+unify hole v)
+(searchEnv ty xs (n + 1))
+
+extractTy : Arg Type → Type
+extractTy (arg ai t) = t
+fallback : TC ⊤
+fallback = do
+ty ← inferType hole
+ctx ← getContext
+let ctx' = map extractTy ctx
+searchEnv ty ctx' 0
+open CustomTactic
+-}
